@@ -1127,11 +1127,19 @@ def get_host_gateways():
 
 
 def get_active_jails():
-    return {
-        d['name']: d for d in json.loads(
-            checkoutput(['jls', '--libxo', 'json', '-v'])
-        )['jail-information']['jail']
-    }
+    """Return mapping of active jail names to jls information including IPs."""
+    jls_data = json.loads(
+        checkoutput(['jls', '--libxo', 'json', '-v'])
+    )['jail-information']['jail']
+    active = {}
+    for jail in jls_data:
+        # Normalize ip address keys for convenience
+        if 'ip4.addr' in jail:
+            jail['ip4.addr'] = jail['ip4.addr']
+        if 'ip6.addr' in jail:
+            jail['ip6.addr'] = jail['ip6.addr']
+        active[jail['name']] = jail
+    return active
 
 
 def validate_plugin_manifest(manifest, _callback, silent):
@@ -1155,6 +1163,16 @@ def validate_plugin_manifest(manifest, _callback, silent):
 
 def retrieve_ip4_for_jail(conf, jail_running):
     short_ip4 = full_ip4 = None
+    jail_identifier = f'ioc-{conf["host_hostuuid"].replace(".", "_")}'
+    if jail_running:
+        active = get_active_jails().get(jail_identifier, {})
+        ip_from_jls = active.get('ip4.addr') or active.get('ipv4')
+        if ip_from_jls:
+            short_ip4 = 'DHCP' if iocage_lib.ioc_common.check_truthy(conf['dhcp']) else \
+                ','.join([i.split('|')[-1].split('/')[0] for i in ip_from_jls.split(',')])
+            full_ip4 = ip_from_jls
+            return {'short_ip4': short_ip4, 'full_ip4': full_ip4}
+
     if iocage_lib.ioc_common.check_truthy(conf['dhcp']) and jail_running and os.geteuid() == 0:
         interface = conf['interfaces'].split(',')[0].split(':')[0]
 
@@ -1164,7 +1182,7 @@ def retrieve_ip4_for_jail(conf, jail_running):
 
         short_ip4 = 'DHCP'
         full_ip4_cmd = [
-            'jexec', f'ioc-{conf["host_hostuuid"].replace(".", "_")}',
+            'jexec', jail_identifier,
             'ifconfig', interface, 'inet'
         ]
         try:
