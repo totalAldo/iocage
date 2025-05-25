@@ -28,6 +28,9 @@ import re
 import subprocess as su
 import uuid as _uuid
 
+import concurrent.futures
+import threading
+
 import iocage_lib.ioc_common
 import iocage_lib.ioc_json
 import iocage_lib.ioc_plugin
@@ -183,175 +186,152 @@ class IOCList(object):
 
         return table.draw()
 
-    def list_all(self, jails):
-        """List all jails."""
-        self.full = True if self.plugin else self.full
-        active_jails = iocage_lib.ioc_common.get_active_jails()
-        default_gateways = iocage_lib.ioc_common.get_host_gateways()
-        jail_list = []
-        plugin_index_data = {}
+    def _collect_jail_info(self, jail, active_jails, default_gateways,
+                           plugin_index_data, plugin_index_lock):
+        """Return row information for a jail dataset."""
+        try:
+            mountpoint = jail.properties['mountpoint']
+        except KeyError:
+            iocage_lib.ioc_common.logit(
+                {
+                    'level': 'ERROR',
+                    'message': f'{jail.name} mountpoint is misconfigured. '
+                               'Please correct this.'
+                },
+                _callback=self.callback,
+                silent=self.silent
+            )
+            return None
 
-        for jail in jails:
+        try:
+            conf = iocage_lib.ioc_json.IOCJson(mountpoint).json_get_value('all')
+            state = ''
+        except (Exception, SystemExit):
+            def_props = iocage_lib.ioc_json.IOCJson().json_get_value(
+                'all',
+                default=True
+            )
+            conf = {x: 'N/A' for x in def_props}
+            conf['host_hostuuid'] = f'{jail.name.split("/")[-1]}'
+            conf['release'] = 'N/A'
+            state = 'CORRUPT'
+            jid = '-'
+
+        if self.basejail_only and not iocage_lib.ioc_common.check_truthy(
+            conf.get('basejail', 0)
+        ):
+            return None
+
+        uuid_full = conf['host_hostuuid']
+        uuid = uuid_full
+
+        if not self.full:
             try:
-                mountpoint = jail.properties['mountpoint']
-            except KeyError:
-                iocage_lib.ioc_common.logit(
-                    {
-                        'level': 'ERROR',
-                        'message': f'{jail.name} mountpoint is misconfigured. '
-                        'Please correct this.'
-                    },
-                    _callback=self.callback,
-                    silent=self.silent
-                )
-                continue
+                uuid = str(_uuid.UUID(uuid, version=4))[:8]
+            except ValueError:
+                pass
 
-            try:
-                conf = iocage_lib.ioc_json.IOCJson(mountpoint).json_get_value(
-                    'all'
-                )
-                state = ''
-            except (Exception, SystemExit):
-                # Jail is corrupt, we want all the keys to exist.
-                # So we will take the defaults and let the user
-                # know that they are not correct.
-                def_props = iocage_lib.ioc_json.IOCJson().json_get_value(
-                    'all',
-                    default=True
-                )
-                conf = {
-                    x: 'N/A'
-                    for x in def_props
-                }
-                conf['host_hostuuid'] = \
-                    f'{jail.name.split("/")[-1]}'
-                conf['release'] = 'N/A'
-                state = 'CORRUPT'
-                jid = '-'
+        full_ip4 = conf['ip4_addr']
+        ip6 = conf['ip6_addr']
 
-            if self.basejail_only and not iocage_lib.ioc_common.check_truthy(
-                conf.get('basejail', 0)
-            ):
-                continue
+        try:
+            short_ip4 = ",".join([
+                item.split("|")[1].split("/")[0] for item in full_ip4.split(",")
+            ])
+        except IndexError:
+            short_ip4 = full_ip4 if full_ip4 != 'none' else '-'
 
-            uuid_full = conf["host_hostuuid"]
-            uuid = uuid_full
+        boot = 'on' if iocage_lib.ioc_common.check_truthy(
+            conf.get('boot', 0)) else 'off'
+        jail_type = conf['type']
+        full_release = conf['release']
+        basejail = 'yes' if iocage_lib.ioc_common.check_truthy(
+            conf.get('basejail', 0)) else 'no'
 
-            if not self.full:
-                # We only want to show the first 8 characters of a UUID,
-                # if it's not a UUID, we will show the whole name no matter
-                # what.
-                try:
-                    uuid = str(_uuid.UUID(uuid, version=4))[:8]
-                except ValueError:
-                    # We leave the "uuid" untouched, as it's not a valid
-                    # UUID, but instead a named jail.
-                    pass
+        if 'HBSD' in full_release:
+            full_release = re.sub(r"\W\w.", '-', full_release)
+            full_release = full_release.replace('--SD', '-STABLE-HBSD')
+            short_release = full_release.rstrip('-HBSD')
+        else:
+            short_release = '-'.join(full_release.rsplit('-')[:2])
 
-            full_ip4 = conf["ip4_addr"]
-            ip6 = conf["ip6_addr"]
+        if full_ip4 == 'none':
+            full_ip4 = '-'
 
-            try:
-                short_ip4 = ",".join([item.split("|")[1].split("/")[0]
-                                      for item in full_ip4.split(",")])
-            except IndexError:
-                short_ip4 = full_ip4 if full_ip4 != "none" else "-"
+        if ip6 == 'none':
+            ip6 = '-'
 
-            boot = 'on' if iocage_lib.ioc_common.check_truthy(
-                conf.get('boot', 0)) else 'off'
-            jail_type = conf["type"]
-            full_release = conf["release"]
-            basejail = 'yes' if iocage_lib.ioc_common.check_truthy(
-                conf.get('basejail', 0)) else 'no'
+        jid = None
+        if state != 'CORRUPT':
+            jid = active_jails.get(
+                f'ioc-{uuid.replace(".", "_")}', {}).get('jid')
+            state = 'up' if jid else 'down'
 
-            if "HBSD" in full_release:
-                full_release = re.sub(r"\W\w.", "-", full_release)
-                full_release = full_release.replace("--SD", "-STABLE-HBSD")
-                short_release = full_release.rstrip("-HBSD")
+        if conf['type'] == 'template':
+            template = '-'
+        else:
+            jail_root = Dataset(f'{jail.name}/root')
+            if jail_root.exists:
+                _origin_property = jail_root.properties.get('origin')
             else:
-                short_release = "-".join(full_release.rsplit("-")[:2])
+                _origin_property = None
 
-            if full_ip4 == "none":
-                full_ip4 = "-"
-
-            if ip6 == "none":
-                ip6 = "-"
-
-            # Will be set already by a corrupt jail
-            jid = None
-            if state != 'CORRUPT':
-                jid = active_jails.get(f'ioc-{uuid.replace(".", "_")}', {}).get('jid')
-                state = 'up' if jid else 'down'
-
-            if conf["type"] == "template":
-                template = "-"
+            if _origin_property:
+                template = _origin_property
+                template = template.rsplit('/root@', 1)[0].rsplit('/', 1)[-1]
             else:
-                jail_root = Dataset(f'{jail.name}/root')
-                if jail_root.exists:
-                    _origin_property = jail_root.properties.get('origin')
-                else:
-                    _origin_property = None
+                template = '-'
 
-                if _origin_property:
-                    template = _origin_property
-                    template = template.rsplit("/root@", 1)[0].rsplit(
-                        "/", 1)[-1]
-                else:
-                    template = "-"
+        if 'release' in template.lower() or 'stable' in template.lower():
+            template = '-'
 
-            if "release" in template.lower() or "stable" in template.lower():
-                template = "-"
+        ip_dict = iocage_lib.ioc_common.retrieve_ip4_for_jail(conf, bool(jid))
+        full_ip4 = ip_dict['full_ip4'] or full_ip4
+        short_ip4 = ip_dict['short_ip4'] or short_ip4
 
-            ip_dict = iocage_lib.ioc_common.retrieve_ip4_for_jail(conf, bool(jid))
-            full_ip4 = ip_dict['full_ip4'] or full_ip4
-            short_ip4 = ip_dict['short_ip4'] or short_ip4
+        if self.full and self.plugin:
+            if jail_type != 'plugin' and jail_type != 'pluginv2':
+                return None
 
-            # Append the JID and the NAME to the table
-
-            if self.full and self.plugin:
-                if jail_type != "plugin" and jail_type != "pluginv2":
-                    # We only want plugin type jails to be apart of the
-                    # list
-
-                    continue
-
-                try:
-                    with open(f"{mountpoint}/plugin/ui.json", "r") as u:
-                        ui_data = json.load(u)
-                        admin_portal = ','.join(
-                            iocage_lib.ioc_common.retrieve_admin_portals(
-                                conf, bool(jid), ui_data['adminportal'], default_gateways, ip_dict
-                            )
+            try:
+                with open(f'{mountpoint}/plugin/ui.json', 'r') as u:
+                    ui_data = json.load(u)
+                    admin_portal = ','.join(
+                        iocage_lib.ioc_common.retrieve_admin_portals(
+                            conf, bool(jid), ui_data['adminportal'],
+                            default_gateways, ip_dict
                         )
-                        try:
-                            ph = ui_data["adminportal_placeholders"].items()
-                            if ph and not bool(jid):
-                                admin_portal = f"{uuid} is not running!"
-                            else:
-                                for placeholder, prop in ph:
-                                    admin_portal = admin_portal.replace(
-                                        placeholder,
-                                        iocage_lib.ioc_json.IOCJson(
-                                            mountpoint).json_plugin_get_value(
-                                            prop.split("."))
+                    )
+                    try:
+                        ph = ui_data['adminportal_placeholders'].items()
+                        if ph and not bool(jid):
+                            admin_portal = f'{uuid} is not running!'
+                        else:
+                            for placeholder, prop in ph:
+                                admin_portal = admin_portal.replace(
+                                    placeholder,
+                                    iocage_lib.ioc_json.IOCJson(
+                                        mountpoint).json_plugin_get_value(
+                                        prop.split('.')
                                     )
-                        except KeyError:
-                            pass
-                        except iocage_lib.ioc_exceptions.CommandNeedsRoot:
-                            admin_portal = "Admin Portal requires root"
-                        except iocage_lib.ioc_exceptions.CommandFailed as e:
-                            admin_portal = b' '.join(e.message).decode()
+                                )
+                    except KeyError:
+                        pass
+                    except iocage_lib.ioc_exceptions.CommandNeedsRoot:
+                        admin_portal = 'Admin Portal requires root'
+                    except iocage_lib.ioc_exceptions.CommandFailed as e:
+                        admin_portal = b' '.join(e.message).decode()
 
-                        doc_url = ui_data.get('docurl', '-')
+                    doc_url = ui_data.get('docurl', '-')
 
-                except FileNotFoundError:
-                    # They just didn't set a admin portal.
-                    admin_portal = doc_url = '-'
+            except FileNotFoundError:
+                admin_portal = doc_url = '-'
 
-                jail_list.append([jid, uuid, boot, state, jail_type,
-                                  full_release, full_ip4, ip6, template,
-                                  admin_portal, doc_url])
-                if self.plugin_data:
+            row = [jid, uuid, boot, state, jail_type, full_release,
+                   full_ip4, ip6, template, admin_portal, doc_url]
+
+            if self.plugin_data:
+                with plugin_index_lock:
                     if conf['plugin_repository'] not in plugin_index_data:
                         repo_obj = iocage_lib.ioc_plugin.IOCPlugin(
                             git_repository=conf['plugin_repository']
@@ -409,18 +389,41 @@ class IOCList(object):
                     index_plugin_conf = plugin_index_data[
                         conf['plugin_repository']
                     ].get(conf['plugin_name'], {})
-                    jail_list[-1].extend([
-                        conf['plugin_name'], conf['plugin_repository'],
-                        index_plugin_conf.get('primary_pkg'),
-                        index_plugin_conf.get('category'),
-                        index_plugin_conf.get('maintainer'),
-                    ])
-            elif self.full:
-                jail_list.append([jid, uuid, boot, state, jail_type,
-                                  full_release, full_ip4, ip6, template,
-                                  basejail])
-            else:
-                jail_list.append([jid, uuid, state, short_release, short_ip4])
+                row.extend([
+                    conf['plugin_name'], conf['plugin_repository'],
+                    index_plugin_conf.get('primary_pkg'),
+                    index_plugin_conf.get('category'),
+                    index_plugin_conf.get('maintainer'),
+                ])
+        elif self.full:
+            row = [jid, uuid, boot, state, jail_type, full_release,
+                   full_ip4, ip6, template, basejail]
+        else:
+            row = [jid, uuid, state, short_release, short_ip4]
+
+        return row
+
+    def list_all(self, jails):
+        """List all jails."""
+        self.full = True if self.plugin else self.full
+        active_jails = iocage_lib.ioc_common.get_active_jails()
+        default_gateways = iocage_lib.ioc_common.get_host_gateways()
+        jail_list = []
+        plugin_index_data = {}
+        plugin_index_lock = threading.Lock()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = executor.map(
+                lambda j: self._collect_jail_info(
+                    j, active_jails, default_gateways,
+                    plugin_index_data, plugin_index_lock
+                ),
+                jails
+            )
+
+            for row in results:
+                if row:
+                    jail_list.append(row)
 
         list_type = "list_full" if self.full else "list_short"
         sort = iocage_lib.ioc_common.ioc_sort(list_type,
