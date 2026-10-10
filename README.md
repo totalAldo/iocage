@@ -118,7 +118,7 @@ To see a list of commands available to you now, type `iocage` outside the jail.
 
 - A release supported by the [FreeBSD Security Team](https://www.freebsd.org/security/#sup), or a derivative providing the same jail and ZFS interfaces
 - ZFS file system
-- Python 3.11.4 or newer (currently tested with 3.11–3.14)
+- Python 3.11.4 or newer (currently tested with 3.11–3.15)
 - UTF-8 locale (place into your ~/.login_conf):
 
 ```plain

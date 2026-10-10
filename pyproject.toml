@@ -15,7 +15,8 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Programming Language :: Python :: 3.14"
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15"
 ]
 # Archive extraction requires the tarfile filters added in Python 3.11.4.
 requires-python = ">=3.11.4"

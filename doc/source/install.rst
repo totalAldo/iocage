@@ -14,7 +14,7 @@ Requirements
 
 iocage supports releases maintained by the
 `FreeBSD Security Team <https://www.freebsd.org/security/#sup>`_
-and requires Python 3.11.4 or newer. Python 3.11 through 3.14 are tested.
+and requires Python 3.11.4 or newer. Python 3.11 through 3.15 are tested.
 Derivative systems must provide the same jail and ZFS interfaces.
 
 The examples below use FreeBSD ``15.1-RELEASE`` and Python 3.14.

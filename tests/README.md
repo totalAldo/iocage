@@ -83,7 +83,9 @@ image
 - cd iocage
 - sudo python3.14 -m pytest tests/functional_tests --zpool="TEST" --release=15.1-RELEASE --server="custom_server"
 
-Use Python 3.11.4 or newer for tests. Pass an explicit supported release with
+Use Python 3.11.4 or newer for tests. CI tests Python 3.11 through 3.15;
+the examples and release/documentation builds continue to use Python 3.14.
+Pass an explicit supported release with
 ``--release`` that is no newer than the host. With ``--nat --upgrade``, upgrade
 tests cover 14.4-RELEASE to 14.5-RELEASE and 14.5-RELEASE to 15.1-RELEASE;
 other target releases skip these tests.
